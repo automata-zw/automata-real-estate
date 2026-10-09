@@ -9,7 +9,9 @@ export const runtime = "nodejs";
 const AGENCY_ID = "00000000-0000-0000-0000-000000000001";
 
 const viewingRequestSchema = z.object({
-  propertyId: z.string().uuid(),
+  propertyId: z.string().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  "Invalid property ID format"),
   name: z.string().trim().min(2).max(100),
   phone: z
     .string()
@@ -32,18 +34,33 @@ export async function POST(request: Request) {
     const parsed = viewingRequestSchema.safeParse(body);
 
     if (!parsed.success) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Please check your details and try again.",
-          fields: parsed.error.flatten().fieldErrors,
-        },
-        { status: 400 }
-      );
-    }
+  console.error(
+    "Viewing request validation failed:",
+    parsed.error.flatten().fieldErrors
+  );
+
+  return NextResponse.json(
+    {
+      success: false,
+      error: "Please check your details and try again.",
+      fields: parsed.error.flatten().fieldErrors,
+    },
+    { status: 400 }
+  );
+}
 
     const input = parsed.data;
     const start = new Date(input.scheduledStart);
+    // Viewing requests must start on a 15-minute boundary.
+    if (start.getUTCMinutes() % 15 !== 0) {
+    return NextResponse.json(
+    {
+      success: false,
+      error: "Please choose a viewing time in 15-minute intervals.",
+    },
+    { status: 400 }
+  );
+}
 
     // Demo viewing duration: 60 minutes.
     const end = new Date(start.getTime() + 60 * 60 * 1000);
@@ -56,6 +73,7 @@ export async function POST(request: Request) {
         .eq("agency_id", AGENCY_ID)
         .eq("id", input.propertyId)
         .maybeSingle();
+    console.log("Property lookup debug:",{requestedPropertyId:input.propertyId,expectedAgencyId: AGENCY_ID,propertyFound: Boolean(property),propertyError:propertyError?.message ?? null})
 
     if (propertyError) {
       console.error("Property lookup failed:", propertyError.message);

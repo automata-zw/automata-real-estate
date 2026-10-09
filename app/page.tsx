@@ -58,7 +58,87 @@ function buildPreferences(
       : null,
   };
 }
+function getMinimumViewingDateTime(): string {
+  const minimumTime = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Harare",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(minimumTime);
+
+  const values = Object.fromEntries(
+    parts.map((part) => [part.type, part.value])
+  );
+
+  // Represent Harare's local date and time without converting it to UTC.
+  const roundedTime = new Date(
+    Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      Number(values.hour),
+      Number(values.minute)
+    )
+  );
+
+  // Round up to the next 15-minute boundary.
+  const minute = roundedTime.getUTCMinutes();
+  roundedTime.setUTCMinutes(Math.ceil(minute / 15) * 15, 0, 0);
+
+  return roundedTime.toISOString().slice(0, 16);
+}
+function harareDateTimeToISO(value: string): string {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+  );
+
+  if (!match) {
+    throw new Error("Please choose a valid viewing date and time.");
+  }
+
+  const [, year, month, day, hour, minute] = match;
+
+  // Zimbabwe uses UTC+02:00.
+  const utcMilliseconds =
+    Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute)
+    ) -
+    2 * 60 * 60 * 1000;
+
+  const date = new Date(utcMilliseconds);
+
+  // Reject impossible calendar dates instead of silently normalizing them.
+  const check = new Date(
+    Date.UTC(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute)
+    )
+  );
+
+  if (
+    check.getUTCFullYear() !== Number(year) ||
+    check.getUTCMonth() !== Number(month) - 1 ||
+    check.getUTCDate() !== Number(day) ||
+    check.getUTCHours() !== Number(hour) ||
+    check.getUTCMinutes() !== Number(minute)
+  ) {
+    throw new Error("Please choose a valid viewing date and time.");
+  }
+
+  return date.toISOString();
+}
 export default function Home() {
   const [form, setForm] = useState<SearchForm>(INITIAL_FORM);
   const [matches, setMatches] = useState<PropertyMatch[]>([]);
@@ -68,6 +148,11 @@ export default function Home() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState("");
   const [hasSearched, setHasSearched] = useState(false);
+  const [selectedProperty, setSelectedProperty] =useState<PropertyMatch | null>(null);
+  const [viewingForm, setViewingForm] = useState({name: "",phone: "",email: "",scheduledStart: "",});
+  const [submittingViewing, setSubmittingViewing] = useState(false);
+  const [viewingError, setViewingError] = useState("");
+  const [viewingSuccess, setViewingSuccess] = useState("");
 
   async function searchProperties(
     preferences: PropertySearchPreferences,
@@ -120,6 +205,68 @@ export default function Home() {
 
     void searchProperties(buildPreferences(form));
   }
+  async function handleViewingSubmit(
+  event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+
+  if (!selectedProperty) {
+    setViewingError("Please select a property first.");
+    return;
+  }
+
+  setSubmittingViewing(true);
+  setViewingError("");
+  setViewingSuccess("");
+
+  try {
+    console.log("Selected property ID:",selectedProperty.property.id)
+    const response = await fetch("/api/viewing-requests", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        propertyId: selectedProperty.property.id,
+        name: viewingForm.name,
+        phone: viewingForm.phone,
+        email: viewingForm.email,
+        scheduledStart: harareDateTimeToISO(viewingForm.scheduledStart),
+      }),
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      setViewingError(
+        result.error ??
+          "We couldn't submit your viewing request. Please try again."
+      );
+      return;
+    }
+
+    const confirmedTime = new Date(
+      result.viewing.scheduledStart
+    ).toLocaleString("en-GB",{timeZone: "Africa/Harare",day:"numeric",month:"long",year:'numeric',hour:"2-digit",minute:"2-digit",hourCycle:"h23"});
+
+    setViewingSuccess(
+      `Viewing request submitted for ${selectedProperty.property.title} on ${confirmedTime}.The agency will confirm your appointment`
+    );
+
+    setViewingForm({
+      name: "",
+      phone: "",
+      email: "",
+      scheduledStart: "",
+    });
+  } catch {
+    setViewingError(
+      "We couldn't connect to the booking service. Please try again."
+    );
+  } finally {
+    setSubmittingViewing(false);
+  }
+}
+
 
   function chooseLocation(location: string) {
     const updatedForm = {
@@ -602,11 +749,7 @@ export default function Home() {
                     <button
                       type="button"
                       disabled={property.status !== "AVAILABLE"}
-                      onClick={() => {
-                        alert(
-                          `Viewing requests for ${property.reference_code} will be connected in the next step.`
-                        );
-                      }}
+                      onClick={() => {setSelectedProperty({property,score,reasons,});setViewingError("");setViewingSuccess("");}}
                       className="w-full rounded-xl border border-[#234b39] px-4 py-3 text-sm font-bold text-[#234b39] transition hover:bg-[#234b39] hover:text-white disabled:cursor-not-allowed disabled:border-gray-200 disabled:text-gray-400 disabled:hover:bg-white"
                     >
                       {property.status === "AVAILABLE"
@@ -620,7 +763,185 @@ export default function Home() {
           </div>
         )}
       </section>
+      {selectedProperty && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="viewing-title"
+            className="my-auto w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl sm:p-8"
+          >
+            <div className="mb-6 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-widest text-[#64816e]">
+                  Property viewing
+                </p>
 
+                <h2
+                  id="viewing-title"
+                  className="mt-2 text-2xl font-bold"
+                >
+                  Request a viewing
+                </h2>
+
+                <p className="mt-2 text-sm text-gray-500">
+                  {selectedProperty.property.title}
+                </p>
+
+                <p className="mt-1 text-sm font-semibold text-[#234b39]">
+                  {selectedProperty.property.reference_code}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedProperty(null)}
+                className="rounded-lg px-3 py-2 text-sm font-semibold text-gray-500 hover:bg-gray-100"
+              >
+                Close
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleViewingSubmit}
+              className="space-y-4"
+            >
+              <div>
+                <label
+                  htmlFor="viewing-name"
+                  className="mb-1.5 block text-sm font-semibold"
+                >
+                  Full name *
+                </label>
+
+                <input
+                  id="viewing-name"
+                  required
+                  minLength={2}
+                  maxLength={100}
+                  value={viewingForm.name}
+                  onChange={(event) =>
+                    setViewingForm({
+                      ...viewingForm,
+                      name: event.target.value,
+                    })
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-[#234b39]"
+                  placeholder="Your full name"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="viewing-phone"
+                  className="mb-1.5 block text-sm font-semibold"
+                >
+                  Phone number *
+                </label>
+
+                <input
+                  id="viewing-phone"
+                  type="tel"
+                  required
+                  minLength={7}
+                  maxLength={25}
+                  value={viewingForm.phone}
+                  onChange={(event) =>
+                    setViewingForm({
+                      ...viewingForm,
+                      phone: event.target.value,
+                    })
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-[#234b39]"
+                  placeholder="+263 77 123 4567"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="viewing-email"
+                  className="mb-1.5 block text-sm font-semibold"
+                >
+                  Email (optional)
+                </label>
+
+                <input
+                  id="viewing-email"
+                  type="email"
+                  maxLength={254}
+                  value={viewingForm.email}
+                  onChange={(event) =>
+                    setViewingForm({
+                      ...viewingForm,
+                      email: event.target.value,
+                    })
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-[#234b39]"
+                  placeholder="you@example.com"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="viewing-date"
+                  className="mb-1.5 block text-sm font-semibold"
+                >
+                  Preferred date and time *
+                </label>
+
+                <input
+                  id="viewing-date"
+                  type="datetime-local"
+                  required
+                  min={getMinimumViewingDateTime()}
+                  step={900}
+                  value={viewingForm.scheduledStart}
+                  onChange={(event) =>
+                    setViewingForm({
+                      ...viewingForm,
+                      scheduledStart: event.target.value,
+                    })
+                  }
+                  className="w-full rounded-xl border border-gray-200 px-4 py-3 text-sm outline-none focus:border-[#234b39]"
+                />
+
+                <p className="mt-1.5 text-xs leading-5 text-gray-500">
+                  Choose a time at least two hours ahead. The agency's
+                  availability rules will be checked when you submit.
+                </p>
+              </div>
+
+              {viewingError && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+                >
+                  {viewingError}
+                </div>
+              )}
+
+              {viewingSuccess && (
+                <div
+                  role="status"
+                  className="rounded-xl border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+                >
+                  {viewingSuccess}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={submittingViewing}
+                className="w-full rounded-xl bg-[#234b39] px-5 py-4 text-sm font-bold text-white transition hover:bg-[#193829] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {submittingViewing
+                  ? "Submitting request..."
+                  : "Submit viewing request →"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
       <footer className="border-t border-gray-200 bg-white">
         <div className="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-8 text-sm text-gray-500 sm:flex-row sm:items-center sm:justify-between sm:px-8">
           <p>
